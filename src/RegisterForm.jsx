@@ -2,21 +2,22 @@ import React, { useState, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, collection, addDoc, serverTimestamp } from 'firebase/firestore';
 
+import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+
 const firebaseConfig = {
   apiKey: "AIzaSyBbaa2NNHOf_Zg_AcNamRoByUqkwMwYXvo",
   authDomain: "project-enet-c.firebaseapp.com",
   projectId: "project-enet-c",
-  storageBucket: "project-enet-c.firebasestorage.app",
+  storageBucket: "project-enet-c.firebasestorage.app", // จุดนี้เปิดสิทธิ์บน Blaze เรียบร้อยแล้ว
   messagingSenderId: "818148441563",
   appId: "1:818148441563:web:a4471a1ca94f8cee847bfe",
   measurementId: "G-RQ2RBKCJG1"
 };
 
+// เริ่มต้นเปิดการใช้งาน Firebase Services
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
-
-// ⚠️ เอาลิงก์ Web app URL ที่ได้จาก Google Apps Script ในขั้นตอนที่ 1 มาวางตรงนี้ครับ
-const GOOGLE_APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbwFwV5dFDQMDNrwbd2MhEMJZI5cIkJ45M_h3BCH4V-FKkPTAjTPSGxyu2JAD-FL1LKw/exec";
+const storage = getStorage(app); // 👈 เปิดใช้งาน Firebase Storage ตัวเอกของเรา
 
 function RegisterForm() {
   const [name, setName] = useState('');       
@@ -36,16 +37,6 @@ function RegisterForm() {
     }
   };
 
-  // ฟังก์ชันแปลงไฟล์เป็น Base64 เพื่อให้ส่งผ่าน API ได้ง่าย
-  const convertFileToBase64 = (file) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = (error) => reject(error);
-    });
-  };
-
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!videoFile) {
@@ -55,56 +46,44 @@ function RegisterForm() {
 
     try {
       setLoading(true);
-      setSubmissionResult('กำลังอัปโหลดวิดีโอเข้า Google Drive... (ขั้นตอนนี้อาจใช้เวลาสักครู่)');
-      console.log("🚀 เริ่มต้นกระบวนการส่งวิดีโอไป Google Drive...");
+      setSubmissionResult('กำลังอัปโหลดวิดีโอ...');
+      console.log("🚀 เริ่มต้นอัปโหลดไฟล์ตรงเข้า Firebase Storage...");
 
-      // 1. แปลงไฟล์วิดีโอเป็น Base64
-      const base64Data = await convertFileToBase64(videoFile);
+      // 1. ตั้งชื่อไฟล์ใหม่โดยใส่เวลา + ชื่อ ป้องกันชื่อซ้ำ
       const fileExtension = videoFile.name.split('.').pop();
-      const fileName = `${Date.now()}_${name}.${fileExtension}`;
+      const storageFileName = `videos/${Date.now()}_${name}.${fileExtension}`;
 
-      // 2. ส่งไฟล์ไปที่ Google Apps Script หลังบ้าน
-      const response = await fetch(GOOGLE_APPS_SCRIPT_URL, {
-        method: 'POST',
-        mode: 'cors',
-        headers: {
-          'Content-Type': 'text/plain;charset=utf-8', 
-        },
-        body: JSON.stringify({
-          fileName: fileName,
-          mimeType: videoFile.type,
-          fileBase64: base64Data
-        })
-      });
+      // 2. ระบุปลายทางใน Firebase Storage และกดอัปโหลดไฟล์ประเภท Binary (ไม่ต้องแปลงเป็น Base64 แล้ว!)
+      const storageRef = ref(storage, storageFileName);
+      const uploadResult = await uploadBytes(storageRef, videoFile);
+      
+      console.log("✅ อัปโหลดไฟล์ดิบเข้าคลาวด์สำเร็จ! กำลังสร้างลิงก์เข้าถึง...");
+      
+      // 3. ดึงลิงก์ URL (Token) สำหรับดาวน์โหลดไฟล์ออกมา
+      const firebaseStorageURL = await getDownloadURL(uploadResult.ref);
+      console.log("🔗 ลิงก์ Firebase Storage ของคุณคือ:", firebaseStorageURL);
 
-      const result = await response.json();
+      setSubmissionResult('บันทึกวิดีโอสำเร็จ!');
 
-      if (result.status !== 'success') {
-        throw new Error(result.message || 'เกิดข้อผิดพลาดในการอัปโหลดไฟล์ไป Google Drive');
-      }
-
-      const driveDownloadURL = result.videoUrl;
-      console.log("✅ วิดีโอเข้า Google Drive ของคุณสำเร็จแล้ว! ลิงก์คือ:", driveDownloadURL);
-      setSubmissionResult('บันทึกวิดีโอสำเร็จ! กำลังบันทึกข้อมูลฟอร์มลงคอลเลกชัน assessments ใน Firestore...');
-
-      // 3. นำข้อมูลฟอร์มและลิงก์ Google Drive ไปหยอดลง Firestore
+      // 4. บันทึกข้อมูลและลิงก์ของ Firebase Storage ลง Firestore คอลเลกชัน assessments
       console.log("📝 กำลังบันทึกเอกสารลง Firestore...");
       await addDoc(collection(db, 'assessments'), {
         name,
         job_role: jobRole,
         line_user_id: "TEST_USER_" + Date.now(), 
-        video_url: driveDownloadURL, // หยอดลิงก์ Google Drive เข้าคอลเลกชัน
+        video_url: firebaseStorageURL, // แปะลิงก์ Firebase Storage แทนของเก่า
+        storage_path: storageFileName,  // 💡 บันทึกตำแหน่งที่อยู่ไฟล์ไว้ เพื่อให้ Python ใช้คำสั่งลบไฟล์ได้ง่ายขึ้น
         final_reba_score: 0,
-        risk_level: "กำลังประเมินผล (Test - Google Drive Backend)",
+        risk_level: "กำลังประเมินผล (Firebase Storage Process)",
         risk_details: {
           legs: "", lower_arms: "", neck: "", trunk: "", upper_arms: "", wrists: ""
         },
         timestamp: serverTimestamp() 
       });
 
-      console.log("🎉 บันทึกข้อมูลลงฐานข้อมูลและไดรฟ์สำเร็จทั้งหมด!");
+      console.log("🎉 บันทึกระบบนิเวศ Firebase สมบูรณ์แบบ 100%!");
       setSubmissionResult(`ส่งข้อมูลและวิดีโอของ คุณ ${name} สำเร็จเรียบร้อยแล้ว ✨`);
-      alert(`บันทึกข้อมูลสำเร็จ! วิดีโออัปโหลดเข้า Google Drive และข้อมูลบันทึกเข้า Firestore แล้ว`);
+      alert(`บันทึกข้อมูลสำเร็จ! ระบบทำการเชื่อมโยงวิดีโอกับข้อมูลลงบนระบบ Firebase เรียบร้อย`);
       
       // ล้างค่าในฟอร์ม
       setName('');
@@ -116,7 +95,7 @@ function RegisterForm() {
     } catch (error) {
       console.error("🔥 เกิดข้อผิดพลาด:", error);
       setSubmissionResult(`เกิดข้อผิดพลาด: ${error.message}`);
-      alert(`เกิดข้อผิดพลาด! กรุณาตรวจดูลิงก์ Google Apps Script หรือขนาดไฟล์วิดีโอของคุณ`);
+      alert(`เกิดข้อผิดพลาดในการเชื่อมต่อ Firebase Storage! กรุณาตรวจเช็กกฎ Rules ในคอนโซล`);
     } finally {
       setLoading(false);
     }
@@ -125,11 +104,8 @@ function RegisterForm() {
   return (
     <div style={styles.pageBackground}>
       <div style={styles.cardContainer}>
-        
         <h2 style={styles.mainTitle}>ลงทะเบียนประเมินผล</h2>
-        
         <form onSubmit={handleSubmit}>
-          
           <div style={styles.inputGroup}>
             <label style={styles.label}>ชื่อ-นามสกุล</label>
             <div style={styles.inputWrapper}>
@@ -201,13 +177,13 @@ function RegisterForm() {
           {submissionResult && (
             <div style={styles.successMessage}>{submissionResult}</div>
           )}
-
         </form>
       </div>
     </div>
   );
 }
 
+// (สไตล์ CSS คงไว้เหมือนเดิมทุกประการเพื่อความสวยงามครับ)
 const styles = {
   pageBackground: { backgroundColor: '#f4f5f4', minHeight: '100vh', display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '20px', boxSizing: 'border-box' },
   cardContainer: { backgroundColor: '#ffffff', width: '100%', maxWidth: '440px', borderRadius: '40px', padding: '40px 30px', boxSizing: 'border-box', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' },
